@@ -1,6 +1,7 @@
-import * as _ from 'underscore';
+import * as _ from 'lodash';
 import PromiseRejectionError from '@/lib/promise-rejection-error';
 import { durationHumanize } from '@/filters';
+import { getTags } from '@/services/tags';
 import template from './dashboard.html';
 import shareDashboardTemplate from './share-dashboard.html';
 import './dashboard.less';
@@ -22,7 +23,6 @@ function getWidgetsWithChangedPositions(widgets) {
 }
 
 function DashboardCtrl(
-  $rootScope,
   $routeParams,
   $location,
   $timeout,
@@ -35,6 +35,7 @@ function DashboardCtrl(
   clientConfig,
   Events,
   toastr,
+  Policy,
 ) {
   this.saveInProgress = false;
 
@@ -73,11 +74,20 @@ function DashboardCtrl(
   this.updateGridItems = null;
   this.showPermissionsControl = clientConfig.showPermissionsControl;
   this.globalParameters = [];
+  this.isDashboardOwner = false;
 
   this.refreshRates = clientConfig.dashboardRefreshIntervals.map(interval => ({
     name: durationHumanize(interval),
     rate: interval,
+    enabled: true,
   }));
+
+  const allowedIntervals = Policy.getDashboardRefreshIntervals();
+  if (_.isArray(allowedIntervals)) {
+    _.each(this.refreshRates, (rate) => {
+      rate.enabled = allowedIntervals.indexOf(rate.rate) >= 0;
+    });
+  }
 
   this.setRefreshRate = (rate, load = true) => {
     this.refreshRate = rate;
@@ -99,7 +109,7 @@ function DashboardCtrl(
           .filter(p => p.global)
           .forEach((param) => {
             const defaults = {};
-            defaults[param.name] = _.create(Object.getPrototypeOf(param), param);
+            defaults[param.name] = param.clone();
             defaults[param.name].locals = [];
             globalParams = _.defaults(globalParams, defaults);
             globalParams[param.name].locals.push(param);
@@ -168,6 +178,7 @@ function DashboardCtrl(
       { slug: $routeParams.dashboardSlug },
       (dashboard) => {
         this.dashboard = dashboard;
+        this.isDashboardOwner = currentUser.id === dashboard.user.id || currentUser.hasPermission('admin');
         Events.record('view', 'dashboard', dashboard.id);
         renderDashboard(dashboard, force);
 
@@ -219,9 +230,7 @@ function DashboardCtrl(
   this.archiveDashboard = () => {
     const archive = () => {
       Events.record('archive', 'dashboard', this.dashboard.id);
-      this.dashboard.$delete(() => {
-        $rootScope.$broadcast('reloadDashboards');
-      });
+      this.dashboard.$delete();
     };
 
     const title = 'Archive Dashboard';
@@ -264,16 +273,38 @@ function DashboardCtrl(
     }
   };
 
+  this.loadTags = () => getTags('api/dashboards/tags');
+
   this.saveName = () => {
     Dashboard.save(
       { slug: this.dashboard.id, version: this.dashboard.version, name: this.dashboard.name },
       (dashboard) => {
         this.dashboard = dashboard;
-        $rootScope.$broadcast('reloadDashboards');
       },
       (error) => {
         if (error.status === 403) {
           toastr.error('Name update failed: Permission denied.');
+        } else if (error.status === 409) {
+          toastr.error(
+            'It seems like the dashboard has been modified by another user. ' +
+              'Please copy/backup your changes and reload this page.',
+            { autoDismiss: false },
+          );
+        }
+      },
+    );
+  };
+
+  this.saveTags = () => {
+    Dashboard.save(
+      { slug: this.dashboard.id, version: this.dashboard.version, tags: this.dashboard.tags },
+      (dashboard) => {
+        this.dashboard.tags = dashboard.tags;
+        this.dashboard.version = dashboard.version;
+      },
+      (error) => {
+        if (error.status === 403) {
+          toastr.error('Tags update failed: Permission denied.');
         } else if (error.status === 409) {
           toastr.error(
             'It seems like the dashboard has been modified by another user. ' +
@@ -364,7 +395,6 @@ function DashboardCtrl(
       (dashboard) => {
         this.saveInProgress = false;
         this.dashboard.version = dashboard.version;
-        $rootScope.$broadcast('reloadDashboards');
       },
     );
   };
